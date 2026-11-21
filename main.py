@@ -146,7 +146,6 @@ def load_database():
                 
             db_kws = data.get("SEMUA_KEYWORDS")
             if db_kws and isinstance(db_kws, list):
-                # Bersihkan keyword kosong atau terlalu pendek yang bikin bocor (misal "si", "ta")
                 SEMUA_KEYWORDS = [k.strip() for k in db_kws if k.strip() and k.strip().lower() not in ("si", "ta")]
     except Exception as e:
         print(f"🚨 [DB ERROR] Gagal memuat Supabase: {e}")
@@ -298,7 +297,6 @@ async def halaman_dashboard():
             <button class="tab-btn" onclick="bukaTab('tab-keywords', this)">🔑 Keyword Filter</button>
         </div>
 
-        <!-- TAB 1: LOG PESAN MASUK -->
         <div id="tab-logs" class="tab-content active">
             <div style="display: flex; gap: 10px; margin-bottom: 12px;">
                 <button onclick="fetchLogs()" style="background: #475569; width: auto; margin: 0; cursor: pointer;">🔄 Refresh Log</button>
@@ -309,7 +307,6 @@ async def halaman_dashboard():
             </div>
         </div>
 
-        <!-- TAB 2: TIM BERLINE -->
         <div id="tab-berline" class="tab-content">
             <h2>⚡ ON/OFF Eksekutor Berline</h2>
             <div class="grid">{kartu_berline}</div>
@@ -325,7 +322,6 @@ async def halaman_dashboard():
             </div>
         </div>
 
-        <!-- TAB 3: TIM ROLAND -->
         <div id="tab-roland" class="tab-content">
             <h2>⚡ ON/OFF Eksekutor Roland</h2>
             <div class="grid">{kartu_roland}</div>
@@ -342,7 +338,6 @@ async def halaman_dashboard():
             </div>
         </div>
 
-        <!-- TAB 4: KEYWORD FILTER -->
         <div id="tab-keywords" class="tab-content">
             <h2>🔑 Daftar Keyword Filter (Pisahkan dengan Koma ,)</h2>
             <p style="font-size:13px; color:#94a3b8;">Jockeyfess otomatis lolos semua tanpa filter. Keyword di bawah ini berlaku ketat untuk Moneyfess & 6 Base Reguler.</p>
@@ -476,13 +471,11 @@ async def proses_pesan(msg, chat_id):
 
     teks_bersih = normalisasi_teks(msg.raw_text or "")
     
-    # Jockeyfess wajib lolos semua tanpa filter
     if chat_id == ID_JOCKEYFESS:
         cocok_kw = "ALL (Jockeyfess)"
         target_berline = ID_TOPIK_BERLINE_JOCKEY
         target_roland = ID_TOPIK_ROLAND_JOCKEY
     else:
-        # Base lain wajib lolos filter keyword ketat
         if not teks_bersih or not REGEX_KEYWORDS:
             return
         match = REGEX_KEYWORDS.search(teks_bersih)
@@ -502,7 +495,6 @@ async def proses_pesan(msg, chat_id):
             
         from_peer = await msg.get_input_chat()
 
-        # Forward paralel ke topik Berline & Roland tanpa delay
         await asyncio.gather(
             client_amel(ForwardMessagesRequest(
                 from_peer=from_peer, id=[msg.id], to_peer=PEER_MARKAS_AMEL, top_msg_id=target_berline
@@ -542,9 +534,15 @@ async def poll_fallback():
             except: pass
 
 # ==========================================
-# 8. SISTEM KONTROL MANAGER (BERLINE & ROLAND)
+# 8. SISTEM KONTROL MANAGER & REPLY BERANTAI
 # ==========================================
 queue_pesan = asyncio.Queue()
+RIWAYAT_KOMENTAR = {}  # {msg_id_di_topik: {"tipe": "manager"|"eksekutor", "tim": ..., "targets": [...]}}
+
+def simpan_riwayat(msg_id_topik, data):
+    RIWAYAT_KOMENTAR[msg_id_topik] = data
+    if len(RIWAYAT_KOMENTAR) > 2000:
+        RIWAYAT_KOMENTAR.pop(next(iter(RIWAYAT_KOMENTAR)))
 
 def format_daftar_nama(daftar_nama):
     if not daftar_nama: return ""
@@ -561,14 +559,83 @@ def register_manager_handlers(client_manager, manager_type, my_id, topik_jockey,
         if not sender or sender.id != my_id: return
 
         reply_msg = await event.get_reply_message()
-        if not reply_msg or not reply_msg.forward: return
-        
-        forward_from = reply_msg.forward
-        if not forward_from.chat_id or not forward_from.channel_post:
-            return
+        if not reply_msg: return
 
         input_teks = event.raw_text.strip()
         cmd_lower = input_teks.lower()
+
+        # -------------------------------------------------------
+        # A. JIKA REPLY KE PESAN "✅ ..." (REPLY BERANTAI INSTAN)
+        # -------------------------------------------------------
+        if reply_msg.id in RIWAYAT_KOMENTAR:
+            riwayat = RIWAYAT_KOMENTAR[reply_msg.id]
+            if riwayat["tim"] != manager_type:
+                return
+
+            if riwayat["tipe"] == "manager":
+                target = riwayat["targets"][0]
+                teks_kirim = dict_wording.get(cmd_lower, input_teks)
+                try:
+                    sent = await client_manager.send_message(
+                        entity=target["chat_id"],
+                        message=teks_kirim,
+                        reply_to=target["msg_id"]
+                    )
+                    simpan_riwayat(event.id, {
+                        "tipe": "manager",
+                        "tim": manager_type,
+                        "targets": [{"chat_id": sent.chat_id, "msg_id": sent.id}]
+                    })
+                    await event.edit("✅ Balasan mandiri terkirim ke Base!")
+                except FloodWaitError as e:
+                    await event.edit(f"⏳ Terkena FloodWait {e.seconds} detik.")
+                except Exception as e:
+                    await event.edit(f"❌ Gagal membalas: {e}")
+                return
+
+            elif riwayat["tipe"] == "eksekutor":
+                async def balas_eksekutor(t):
+                    nama_akun = t["akun"]
+                    try:
+                        sent = await clients_eksekutor[nama_akun].send_message(
+                            entity=t["chat_id"],
+                            message=input_teks,
+                            reply_to=t["msg_id"]
+                        )
+                        return (True, STATUS_EKSEKUTOR[nama_akun]["nama"], {
+                            "akun": nama_akun, "chat_id": sent.chat_id, "msg_id": sent.id
+                        })
+                    except FloodWaitError as e:
+                        STATUS_EKSEKUTOR[nama_akun]["aktif"] = False
+                        asyncio.get_event_loop().run_in_executor(None, save_database)
+                        return (False, f"{STATUS_EKSEKUTOR[nama_akun]['nama']} floodwait {e.seconds}s.", None)
+                    except Exception:
+                        return (False, None, None)
+
+                results = await asyncio.gather(*[balas_eksekutor(t) for t in riwayat["targets"]])
+                berhasil = [r[1] for r in results if r[0]]
+                targets_baru = [r[2] for r in results if r[0] and r[2]]
+                laporan_fw = [r[1] for r in results if not r[0] and r[1]]
+
+                if targets_baru:
+                    simpan_riwayat(event.id, {
+                        "tipe": "eksekutor",
+                        "tim": manager_type,
+                        "targets": targets_baru
+                    })
+
+                baris = [f"✅ Balasan terkirim oleh {format_daftar_nama(berhasil)}." if berhasil else "❌ Gagal membalas."]
+                if laporan_fw: baris.extend(laporan_fw)
+                await event.edit("\n".join(baris))
+                return
+
+        # -------------------------------------------------------
+        # B. JIKA REPLY KE FORWARD-AN MENFESS DARI BASE
+        # -------------------------------------------------------
+        if not reply_msg.forward: return
+        forward_from = reply_msg.forward
+        if not forward_from.chat_id or not forward_from.channel_post:
+            return
 
         # Trigger Eksekutor
         if cmd_lower in dict_template:
@@ -584,11 +651,16 @@ def register_manager_handlers(client_manager, manager_type, my_id, topik_jockey,
         # Command Mandiri Manager (a, b, atau ketikan bebas)
         try:
             teks_kirim = dict_wording.get(cmd_lower, input_teks)
-            await client_manager.send_message(
+            sent = await client_manager.send_message(
                 entity=forward_from.chat_id,
                 message=teks_kirim,
                 comment_to=forward_from.channel_post
             )
+            simpan_riwayat(event.id, {
+                "tipe": "manager",
+                "tim": manager_type,
+                "targets": [{"chat_id": sent.chat_id, "msg_id": sent.id}]
+            })
             await event.edit("✅ Berhasil mengirim komentar mandiri ke Base!")
         except FloodWaitError as e:
             await event.edit(f"⏳ Terkena FloodWait {e.seconds} detik.")
@@ -622,20 +694,32 @@ async def worker_eksekutor():
                         if nama_akun == "Land": teks_final += " #L"
                         elif nama_akun == "Vasa": teks_final += " #VS"
                     
-                    await clients_eksekutor[nama_akun].send_message(entity=chat_asal, message=teks_final, comment_to=msg_asal)
-                    return (True, STATUS_EKSEKUTOR[nama_akun]["nama"])
+                    sent = await clients_eksekutor[nama_akun].send_message(
+                        entity=chat_asal, message=teks_final, comment_to=msg_asal
+                    )
+                    return (True, STATUS_EKSEKUTOR[nama_akun]["nama"], {
+                        "akun": nama_akun, "chat_id": sent.chat_id, "msg_id": sent.id
+                    })
                 except FloodWaitError as e:
                     STATUS_EKSEKUTOR[nama_akun]["aktif"] = False
                     asyncio.get_event_loop().run_in_executor(None, save_database)
-                    return (False, f"{STATUS_EKSEKUTOR[nama_akun]['nama']} floodwait {e.seconds}s.")
+                    return (False, f"{STATUS_EKSEKUTOR[nama_akun]['nama']} floodwait {e.seconds}s.", None)
                 except Exception:
-                    return (False, None)
+                    return (False, None, None)
 
             tasks = [kirim_pesan_eksekutor(nama) for nama in akun_bertugas]
             results = await asyncio.gather(*tasks)
 
             berhasil = [res[1] for res in results if res[0]]
+            targets_berhasil = [res[2] for res in results if res[0] and res[2]]
             laporan_floodwait = [res[1] for res in results if not res[0] and res[1]]
+
+            if targets_berhasil:
+                simpan_riwayat(event_mgr.id, {
+                    "tipe": "eksekutor",
+                    "tim": task["tim"],
+                    "targets": targets_berhasil
+                })
 
             baris_laporan = [f"✅ Terkirim oleh {format_daftar_nama(berhasil)}." if berhasil else "❌ Gagal terkirim."]
             if laporan_floodwait: baris_laporan.extend(laporan_floodwait)
