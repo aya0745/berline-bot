@@ -3,6 +3,7 @@ import asyncio
 import re
 import unicodedata
 from datetime import datetime
+from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
@@ -16,7 +17,7 @@ import uvicorn
 load_dotenv()
 
 # ==========================================
-# 1. KONFIGURASI API & KLIEN
+# 1. KONFIGURASI API & KLIEN (4 AKUN)
 # ==========================================
 API_ID = int(os.environ.get("API_ID", 36156436))
 API_HASH = os.environ.get("API_HASH", "e2a8a08504aa88c37f7c941080d6a180")
@@ -29,43 +30,27 @@ ID_GRUP_UTAMA = -1003903118196
 ID_TOPIK_BERLINE_JOCKEY = 74
 ID_TOPIK_BERLINE_ANOTHER = 75
 
-# ID TOPIK ROLAND
-ID_TOPIK_ROLAND_JOCKEY = 13683   # Roland (2) Jockey Money
-ID_TOPIK_ROLAND_ANOTHER = 13682  # Roland (1) Another Base
-
 client_amel = TelegramClient("sesi_amel", API_ID, API_HASH)
 client_berline = TelegramClient("sesi_berline", API_ID, API_HASH)
-client_roland = TelegramClient("sesi_roland", API_ID, API_HASH)
 
 clients_eksekutor = {
-    # Tim Berline (2 Akun)
-    "Arul": TelegramClient("sesi_arul", API_ID, API_HASH),
-    "Hazel": TelegramClient("sesi_hazel", API_ID, API_HASH),
-    # Tim Roland (1 Akun per Jalur)
-    "Land": TelegramClient("sesi_land", API_ID, API_HASH),
-    "Vasa": TelegramClient("sesi_vasa", API_ID, API_HASH),
+    "Jourd": TelegramClient("sesi_jourd", API_ID, API_HASH),
+    "Ejeh": TelegramClient("sesi_ejeh", API_ID, API_HASH),
 }
 
 ID_AMEL = None
 ID_BERLINE = None
-ID_ROLAND = None
 PEER_MARKAS_AMEL = None
+BACKGROUND_TASKS = []
 
 # ==========================================
 # 2. DATABASE SUPABASE & DEFAULT STATE
 # ==========================================
-if SUPABASE_URL and SUPABASE_KEY:
-    supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
-else:
-    supabase = None
+supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY) if (SUPABASE_URL and SUPABASE_KEY) else None
 
 STATUS_EKSEKUTOR = {
-    # Tim Berline: 2 akun aktif di semua jalur
-    "Arul": {"nama": "Arul", "aktif": True, "jalur": "semua", "tim": "berline"},
-    "Hazel": {"nama": "Hazel", "aktif": True, "jalur": "semua", "tim": "berline"},
-    # Tim Roland: 1 akun per jalur (Land = Reguler/1, Vasa = Jockey&Money/2)
-    "Land": {"nama": "Land", "aktif": True, "jalur": "reguler", "tim": "roland"},
-    "Vasa": {"nama": "Vasa", "aktif": True, "jalur": "jockey_money", "tim": "roland"},
+    "Jourd": {"nama": "Jourd", "aktif": True, "jalur": "semua"},
+    "Ejeh": {"nama": "Ejeh", "aktif": True, "jalur": "semua"},
 }
 
 TEMPLATE_EKSEKUTOR = {
@@ -84,20 +69,9 @@ TEMPLATE_EKSEKUTOR = {
     "ppt": "HIT @Berrline As Seller ꩜ ࣪ PPT start 3k materi dari seller, materi dari buyyer 4k, +1,5k with design. avail rush, revisi, dan NO AI 💕 cek result t.me/Elgaresult/16 & testi @elgatesti ♡"
 }
 
-TEMPLATE_ROLAND = {
-    "1": "Hit @DebugW as seller ! 🕶️ Check @ARDUINOST. 👨‍💻 Start 3-20k, avail rush & 100% NO AI. Testi @ArduProof, Result @ArduPorto. 🎓",
-    "edit": "HIT @DebugW As Seller ꩜ ࣪ Editing start from 15-20k 💕 avrush, revisi, NO AI.",
-    "vid": "HIT @DebugW As Seller ꩜ ࣪ Edit vid start from 12-20k/menit 💕 avrush, revisi, NO AI."
-}
-
 WORDING_BERLINE = {
     "a": "HMU @Berrline (as seller) 📝 ꩜ ࣪ start from 3-20k. do check @Elgaleries! avail rush, revisi, & jaminan NO AI. result @Elgaresult & testi @Elgatesult 📂💕",
     "b": "HMU @.Berrline (as seller) 📝 ꩜ ࣪ start from 3-20k. do check @Elgaleries! avail rush, revisi, & jaminan NO AI. result @Elgaresult & testi @Elgatesult 📂💕"
-}
-
-WORDING_ROLAND = {
-    "a": "HMU @DebugW as seller 👨‍💻 @ARDUINOST. Start 3-20k. Avail rush & no AI. 🎓\n☆ Testi @Arduproof\n☆ Result @ArduPorto",
-    "b": "HMU @.DebugW as seller👨‍💻 @ARDUINOST. Start 3-20k. Avail rush & no AI. 🎓\n☆ Testi @Arduproof\n☆ Result @ArduPorto"
 }
 
 SEMUA_KEYWORDS = [
@@ -114,36 +88,25 @@ SEMUA_KEYWORDS = [
 ]
 
 def load_database():
-    global STATUS_EKSEKUTOR, TEMPLATE_EKSEKUTOR, TEMPLATE_ROLAND, WORDING_BERLINE, WORDING_ROLAND, SEMUA_KEYWORDS
-    if not supabase: return
+    global STATUS_EKSEKUTOR, TEMPLATE_EKSEKUTOR, WORDING_BERLINE, SEMUA_KEYWORDS
+    if not supabase:
+        return
     try:
         response = supabase.table("berline_settings").select("data").eq("id", 1).execute()
         if response.data and response.data[0].get("data"):
             data = response.data[0]["data"]
             for k, v in data.get("STATUS_EKSEKUTOR", {}).items():
-                if k in STATUS_EKSEKUTOR: STATUS_EKSEKUTOR[k].update(v)
-            
-            STATUS_EKSEKUTOR["Arul"]["jalur"] = "semua"
-            STATUS_EKSEKUTOR["Hazel"]["jalur"] = "semua"
-            STATUS_EKSEKUTOR["Land"]["jalur"] = "reguler"
-            STATUS_EKSEKUTOR["Vasa"]["jalur"] = "jockey_money"
-            
+                if k in STATUS_EKSEKUTOR:
+                    STATUS_EKSEKUTOR[k].update(v)
+
             for k, v in data.get("TEMPLATE_EKSEKUTOR", {}).items():
-                if k in TEMPLATE_EKSEKUTOR: TEMPLATE_EKSEKUTOR[k] = v
-                
-            for k, v in data.get("TEMPLATE_ROLAND", {}).items():
-                if k in TEMPLATE_ROLAND:
-                    if "DebugW" not in v and "DebugW" in TEMPLATE_ROLAND[k]: continue
-                    TEMPLATE_ROLAND[k] = v
-                
+                if k in TEMPLATE_EKSEKUTOR:
+                    TEMPLATE_EKSEKUTOR[k] = v
+
             for k, v in data.get("WORDING_BERLINE", {}).items():
-                if k in WORDING_BERLINE: WORDING_BERLINE[k] = v
-                
-            for k, v in data.get("WORDING_ROLAND", {}).items():
-                if k in WORDING_ROLAND:
-                    if "DebugW" not in v and "DebugW" in WORDING_ROLAND[k]: continue
-                    WORDING_ROLAND[k] = v
-                
+                if k in WORDING_BERLINE:
+                    WORDING_BERLINE[k] = v
+
             db_kws = data.get("SEMUA_KEYWORDS")
             if db_kws and isinstance(db_kws, list):
                 SEMUA_KEYWORDS = [k.strip() for k in db_kws if k.strip() and k.strip().lower() not in ("si", "ta")]
@@ -151,13 +114,12 @@ def load_database():
         print(f"🚨 [DB ERROR] Gagal memuat Supabase: {e}")
 
 def save_database():
-    if not supabase: return
+    if not supabase:
+        return
     data = {
         "STATUS_EKSEKUTOR": STATUS_EKSEKUTOR,
         "TEMPLATE_EKSEKUTOR": TEMPLATE_EKSEKUTOR,
-        "TEMPLATE_ROLAND": TEMPLATE_ROLAND,
         "WORDING_BERLINE": WORDING_BERLINE,
-        "WORDING_ROLAND": WORDING_ROLAND,
         "SEMUA_KEYWORDS": SEMUA_KEYWORDS
     }
     try:
@@ -190,59 +152,349 @@ def build_regex(keywords):
 REGEX_KEYWORDS = build_regex(SEMUA_KEYWORDS)
 
 def normalisasi_teks(teks: str) -> str:
-    if not teks: return ""
-    return unicodedata.normalize('NFKC', teks)
+    return unicodedata.normalize('NFKC', teks) if teks else ""
 
 # ==========================================
 # 4. LOGGING TERMINAL SYSTEM
 # ==========================================
 MENFESS_LOGS = []
+NAMA_BASE_MAP = {
+    ID_JOCKEYFESS: "Jockeyfess",
+    ID_MONEYFESS: "Moneyfess",
+    -1001611324665: "Base WIB",
+    -1001525948158: "Base WTB",
+    -1001303979309: "Berdagang Online",
+    -1001260932905: "Dagangfess",
+    -1003058482095: "Base Lelang",
+    -1001202510480: "Swalayan",
+}
+
 def simpan_log(chat_id, teks, cocok_kw):
     waktu = datetime.now().strftime("%H:%M:%S")
-    nama_base = "Base Lainnya"
-    if chat_id == ID_JOCKEYFESS: nama_base = "Jockeyfess"
-    elif chat_id == ID_MONEYFESS: nama_base = "Moneyfess"
-    elif chat_id == -1001611324665: nama_base = "Base WIB"
-    elif chat_id == -1001525948158: nama_base = "Base WTB"
-    elif chat_id == -1001303979309: nama_base = "Berdagang Online"
-    elif chat_id == -1001260932905: nama_base = "Dagangfess"
-    elif chat_id == -1003058482095: nama_base = "Base Lelang"
-    elif chat_id == -1001202510480: nama_base = "Swalayan"
-    
+    nama_base = NAMA_BASE_MAP.get(chat_id, "Base Lainnya")
     teks_tampil = teks if teks else "[Media/Gambar tanpa teks]"
     snippet = (teks_tampil[:80] + '...') if len(teks_tampil) > 80 else teks_tampil
     snippet = snippet.replace('\n', ' ')
-    pesan_log = f"[{waktu}] 📥 {nama_base} (KW: {cocok_kw}) -> {snippet}"
-    MENFESS_LOGS.insert(0, pesan_log)
-    if len(MENFESS_LOGS) > 100: MENFESS_LOGS.pop()
+    MENFESS_LOGS.insert(0, f"[{waktu}] 📥 {nama_base} (KW: {cocok_kw}) -> {snippet}")
+    if len(MENFESS_LOGS) > 100:
+        MENFESS_LOGS.pop()
 
 # ==========================================
-# 5. PORTAL DASHBOARD API (DENGAN TAB)
+# 5. HANDLER AMEL (PEMANTAU CHAT MASUK)
 # ==========================================
-app = FastAPI()
+SUDAH_DIPROSES = set()
+
+async def proses_pesan(msg, chat_id):
+    global PEER_MARKAS_AMEL
+    key = (chat_id, msg.id)
+    if key in SUDAH_DIPROSES:
+        return
+    SUDAH_DIPROSES.add(key)
+    if len(SUDAH_DIPROSES) > 5000:
+        SUDAH_DIPROSES.clear()
+
+    teks_bersih = normalisasi_teks(msg.raw_text or "")
+
+    # Jockeyfess lolos semua tanpa filter
+    if chat_id == ID_JOCKEYFESS:
+        cocok_kw = "ALL (Jockeyfess)"
+        target_berline = ID_TOPIK_BERLINE_JOCKEY
+    else:
+        if not teks_bersih or not REGEX_KEYWORDS:
+            return
+        match = REGEX_KEYWORDS.search(teks_bersih)
+        if not match:
+            return
+        cocok_kw = match.group(0)
+        target_berline = ID_TOPIK_BERLINE_JOCKEY if chat_id == ID_MONEYFESS else ID_TOPIK_BERLINE_ANOTHER
+
+    try:
+        if not PEER_MARKAS_AMEL:
+            PEER_MARKAS_AMEL = await client_amel.get_input_entity(ID_GRUP_UTAMA)
+
+        from_peer = await msg.get_input_chat()
+        await client_amel(ForwardMessagesRequest(
+            from_peer=from_peer,
+            id=[msg.id],
+            to_peer=PEER_MARKAS_AMEL,
+            top_msg_id=target_berline
+        ))
+
+        simpan_log(chat_id, teks_bersih, cocok_kw)
+        print(f"⚡ [FORWARD] Base {chat_id} | KW: {cocok_kw}")
+    except ChatForwardsRestrictedError:
+        pass
+    except Exception as e:
+        print(f"🚨 [ERROR FORWARD] {e}")
+
+def register_amel_handlers(client):
+    @client.on(events.NewMessage(chats=SEMUA_BASE_IDS))
+    async def saring_menfess_instan(event):
+        asyncio.create_task(proses_pesan(event.message, event.chat_id))
+
+async def poll_fallback():
+    last_id = {}
+    for cid in SEMUA_BASE_IDS:
+        try:
+            m = await client_amel.get_messages(cid, limit=1)
+            last_id[cid] = m[0].id if m else 0
+        except Exception:
+            last_id[cid] = 0
+
+    while True:
+        await asyncio.sleep(5)
+        if not client_amel.is_connected():
+            continue
+        for cid in SEMUA_BASE_IDS:
+            try:
+                async for m in client_amel.iter_messages(cid, min_id=last_id[cid], reverse=True):
+                    last_id[cid] = max(last_id[cid], m.id)
+                    asyncio.create_task(proses_pesan(m, cid))
+            except FloodWaitError as e:
+                await asyncio.sleep(e.seconds)
+            except Exception:
+                pass
+
+# ==========================================
+# 6. SISTEM KONTROL BERLINE & EKSEKUTOR (JOURD & EJEH)
+# ==========================================
+queue_pesan = asyncio.Queue()
+
+def format_daftar_nama(daftar_nama):
+    if not daftar_nama:
+        return ""
+    if len(daftar_nama) == 1:
+        return daftar_nama[0]
+    if len(daftar_nama) == 2:
+        return f"{daftar_nama[0]} dan {daftar_nama[1]}"
+    return ", ".join(daftar_nama[:-1]) + f", dan {daftar_nama[-1]}"
+
+def register_berline_handlers(client_manager, my_id):
+    @client_manager.on(events.NewMessage(chats=ID_GRUP_UTAMA))
+    async def tangkap_command(event):
+        if not event.is_reply:
+            return
+
+        sender = await event.get_sender()
+        if not sender or sender.id != my_id:
+            return
+
+        reply_msg = await event.get_reply_message()
+        if not reply_msg or not reply_msg.forward:
+            return
+
+        forward_from = reply_msg.forward
+        if not forward_from.chat_id or not forward_from.channel_post:
+            return
+
+        input_teks = event.raw_text.strip()
+        cmd_lower = input_teks.lower()
+
+        # Trigger Eksekutor (Jourd & Ejeh)
+        if cmd_lower in TEMPLATE_EKSEKUTOR:
+            asal_thread = reply_msg.reply_to_msg_id if reply_msg.reply_to_msg_id else 0
+            jalur = "jockey_money" if asal_thread == ID_TOPIK_BERLINE_JOCKEY else "reguler"
+            await queue_pesan.put({
+                "event": event,
+                "reply_msg": reply_msg,
+                "cmd": cmd_lower,
+                "jalur": jalur
+            })
+            return
+
+        # Command Mandiri Berline (a, b, atau ketikan bebas)
+        try:
+            teks_kirim = WORDING_BERLINE.get(cmd_lower, input_teks)
+            await client_manager.send_message(
+                entity=forward_from.chat_id,
+                message=teks_kirim,
+                comment_to=forward_from.channel_post
+            )
+            await event.edit("✅ Berhasil mengirim komentar mandiri ke Base!")
+        except FloodWaitError as e:
+            await event.edit(f"⏳ Terkena FloodWait {e.seconds} detik.")
+        except Exception as e:
+            await event.edit(f"❌ Gagal: {e}")
+
+async def worker_eksekutor():
+    while True:
+        task = await queue_pesan.get()
+        event_mgr = task["event"]
+        reply_msg = task["reply_msg"]
+
+        try:
+            forward_from = reply_msg.forward
+            chat_asal = forward_from.chat_id
+            msg_asal = forward_from.channel_post
+
+            akun_bertugas = [
+                nama for nama, info in STATUS_EKSEKUTOR.items()
+                if info["aktif"] and (info["jalur"] == task["jalur"] or info["jalur"] == "semua")
+                and clients_eksekutor[nama].is_connected()
+            ]
+
+            if not akun_bertugas:
+                await event_mgr.edit("❌ Tidak ada eksekutor (Jourd/Ejeh) yang aktif/terhubung.")
+                queue_pesan.task_done()
+                continue
+
+            async def kirim_pesan_eksekutor(nama_akun):
+                try:
+                    teks_final = TEMPLATE_EKSEKUTOR[task["cmd"]]
+                    if task["jalur"] == "jockey_money":
+                        teks_final = teks_final.replace("@Berrline", "@.Berrline")
+
+                    await clients_eksekutor[nama_akun].send_message(
+                        entity=chat_asal,
+                        message=teks_final,
+                        comment_to=msg_asal
+                    )
+                    return (True, STATUS_EKSEKUTOR[nama_akun]["nama"])
+                except FloodWaitError as e:
+                    STATUS_EKSEKUTOR[nama_akun]["aktif"] = False
+                    asyncio.get_event_loop().run_in_executor(None, save_database)
+                    return (False, f"{STATUS_EKSEKUTOR[nama_akun]['nama']} floodwait {e.seconds}s.")
+                except Exception as e:
+                    print(f"🚨 [EKSEKUTOR ERROR - {nama_akun}] {e}")
+                    return (False, None)
+
+            results = await asyncio.gather(*(kirim_pesan_eksekutor(nama) for nama in akun_bertugas))
+            berhasil = [res[1] for res in results if res[0]]
+            laporan_floodwait = [res[1] for res in results if not res[0] and res[1]]
+
+            baris_laporan = [f"✅ Terkirim oleh {format_daftar_nama(berhasil)}." if berhasil else "❌ Gagal terkirim."]
+            if laporan_floodwait:
+                baris_laporan.extend(laporan_floodwait)
+
+            await event_mgr.edit("\n".join(baris_laporan))
+        except Exception as e:
+            await event_mgr.edit(f"❌ Error: {e}")
+        finally:
+            queue_pesan.task_done()
+
+# ==========================================
+# 7. FITUR NOTIFIKASI KESIAPAN
+# ==========================================
+async def kirim_notifikasi_kesiapan():
+    topik_berline = [ID_TOPIK_BERLINE_JOCKEY, ID_TOPIK_BERLINE_ANOTHER]
+
+    if client_amel.is_connected():
+        for tid in topik_berline:
+            try:
+                await client_amel.send_message(ID_GRUP_UTAMA, f"👁️ [RADAR AMEL] Aktif memantau {len(SEMUA_BASE_IDS)} Channel.", reply_to=tid)
+                await asyncio.sleep(0.2)
+            except Exception:
+                pass
+
+    if client_berline.is_connected():
+        for tid in topik_berline:
+            try:
+                await client_berline.send_message(ID_GRUP_UTAMA, "👑 [SISTEM] Berline siap!", reply_to=tid)
+                await asyncio.sleep(0.2)
+            except Exception:
+                pass
+
+    for nama_eks, client_eks in clients_eksekutor.items():
+        if not client_eks.is_connected():
+            continue
+        info = STATUS_EKSEKUTOR[nama_eks]
+        for tid in topik_berline:
+            try:
+                await client_eks.send_message(ID_GRUP_UTAMA, f"🤖 [{info['nama']}] siap!", reply_to=tid)
+                await asyncio.sleep(0.2)
+            except Exception:
+                pass
+
+# ==========================================
+# 8. STARTUP TERISOLASI (LIFESPAN)
+# ==========================================
+async def konek_aman(client, nama):
+    try:
+        await client.connect()
+        if not await client.is_user_authorized():
+            print(f"❌ [{nama}] Sesi mati / belum login! Buat ulang file .session-nya.")
+            await client.disconnect()
+            return None
+        me = await client.get_me()
+        print(f"✅ [{nama}] Berhasil Terhubung! (ID: {me.id} | Nama: {me.first_name})")
+        return me
+    except Exception as e:
+        print(f"❌ [{nama}] Gagal terhubung: {e}")
+        return None
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    global ID_AMEL, ID_BERLINE, PEER_MARKAS_AMEL
+
+    print("\n⏳ Menghubungkan akun Amel...")
+    me_amel = await konek_aman(client_amel, "Amel")
+    if me_amel:
+        ID_AMEL = me_amel.id
+        await client_amel.get_dialogs(limit=50)
+        PEER_MARKAS_AMEL = await client_amel.get_input_entity(ID_GRUP_UTAMA)
+        register_amel_handlers(client_amel)
+
+    print("⏳ Menghubungkan akun Berline...")
+    me_berline = await konek_aman(client_berline, "Berline")
+    if me_berline:
+        ID_BERLINE = me_berline.id
+        register_berline_handlers(client_berline, ID_BERLINE)
+
+    for nama, client_eks in clients_eksekutor.items():
+        print(f"⏳ Menghubungkan eksekutor: {nama}...")
+        me_eks = await konek_aman(client_eks, nama)
+        if me_eks:
+            STATUS_EKSEKUTOR[nama]["nama"] = me_eks.first_name or me_eks.username or nama
+        else:
+            STATUS_EKSEKUTOR[nama]["aktif"] = False
+
+    save_database()
+
+    BACKGROUND_TASKS.append(asyncio.create_task(kirim_notifikasi_kesiapan()))
+    BACKGROUND_TASKS.append(asyncio.create_task(worker_eksekutor()))
+    if me_amel:
+        BACKGROUND_TASKS.append(asyncio.create_task(poll_fallback()))
+
+    print("\n🚀 Markas Utama (Amel, Berline, Jourd, Ejeh) Siap Tempur!\n")
+    yield
+
+    for task in BACKGROUND_TASKS:
+        task.cancel()
+    await asyncio.gather(
+        client_amel.disconnect(),
+        client_berline.disconnect(),
+        *(c.disconnect() for c in clients_eksekutor.values()),
+        return_exceptions=True
+    )
+
+# ==========================================
+# 9. PORTAL DASHBOARD API
+# ==========================================
+app = FastAPI(lifespan=lifespan)
 
 class ToggleModel(BaseModel):
     nama: str
     aktif: bool
     jalur: str
+
 class WordingModel(BaseModel):
     tipe: str
     kode: str
     teks: str
+
 class KeywordModel(BaseModel):
     keywords: str
 
-def buat_kartu_eksekutor(tim_target):
+def buat_kartu_eksekutor():
     html = ""
     for nama, info in STATUS_EKSEKUTOR.items():
-        if info["tim"] != tim_target: continue
         bg_color = "#16a34a" if info["aktif"] else "#dc2626"
         teks_onoff = "ON" if info["aktif"] else "OFF"
         html += f"""
         <div class="card">
             <div class="row">
-                <strong>{info["nama"]}</strong>
-                <button id="btn-onoff-{nama}" onclick="toggleOnOff('{nama}')" 
+                <strong>{info["nama"]} ({nama})</strong>
+                <button id="btn-onoff-{nama}" onclick="toggleOnOff('{nama}')"
                         style="background: {bg_color}; border: none; padding: 6px 16px; border-radius: 6px; color: white; cursor: pointer; font-weight: bold; width: auto; margin: 0;">
                     {teks_onoff}
                 </button>
@@ -259,8 +511,7 @@ def buat_kartu_eksekutor(tim_target):
 
 @app.get("/", response_class=HTMLResponse)
 async def halaman_dashboard():
-    kartu_berline = buat_kartu_eksekutor("berline")
-    kartu_roland = buat_kartu_eksekutor("roland")
+    kartu_berline = buat_kartu_eksekutor()
     keyword_text = ", ".join(SEMUA_KEYWORDS)
 
     html_content = f"""
@@ -293,10 +544,10 @@ async def halaman_dashboard():
         <div class="tabs">
             <button class="tab-btn active" onclick="bukaTab('tab-logs', this)">📥 Pesan Masuk</button>
             <button class="tab-btn" onclick="bukaTab('tab-berline', this)">👑 Tim Berline</button>
-            <button class="tab-btn" onclick="bukaTab('tab-roland', this)">🎩 Tim Roland</button>
             <button class="tab-btn" onclick="bukaTab('tab-keywords', this)">🔑 Keyword Filter</button>
         </div>
 
+        <!-- TAB 1: LOG PESAN MASUK -->
         <div id="tab-logs" class="tab-content active">
             <div style="display: flex; gap: 10px; margin-bottom: 12px;">
                 <button onclick="fetchLogs()" style="background: #475569; width: auto; margin: 0; cursor: pointer;">🔄 Refresh Log</button>
@@ -307,8 +558,9 @@ async def halaman_dashboard():
             </div>
         </div>
 
+        <!-- TAB 2: TIM BERLINE -->
         <div id="tab-berline" class="tab-content">
-            <h2>⚡ ON/OFF Eksekutor Berline</h2>
+            <h2>⚡ ON/OFF Eksekutor (Jourd & Ejeh)</h2>
             <div class="grid">{kartu_berline}</div>
 
             <h2>👑 Wording Akun Utama Berline (Command: a, b)</h2>
@@ -322,22 +574,7 @@ async def halaman_dashboard():
             </div>
         </div>
 
-        <div id="tab-roland" class="tab-content">
-            <h2>⚡ ON/OFF Eksekutor Roland</h2>
-            <div class="grid">{kartu_roland}</div>
-
-            <h2>🎩 Wording Akun Utama Roland (Command: a, b)</h2>
-            <div class="wording-grid">
-                {''.join([f'''<div class="card"><strong>Command {kode}</strong><textarea id="rol-{kode}" rows="3">{teks}</textarea><button class="action-btn" style="background:#8b5cf6;" onclick="updateWording('roland', '{kode}', 'rol-{kode}')">Simpan</button></div>''' for kode, teks in WORDING_ROLAND.items()])}
-            </div>
-
-            <h2>📝 Wording Eksekutor Roland (Command: 1, edit, vid)</h2>
-            <p style="font-size:13px; color:#94a3b8;">Tag #L (Land) dan #VS (Vasa) otomatis ditambahkan di akhir pesan.</p>
-            <div class="wording-grid">
-                {''.join([f'''<div class="card"><strong>Command: {kode}</strong><textarea id="eks-rol-{kode}" rows="3">{teks}</textarea><button class="action-btn" style="background:#8b5cf6;" onclick="updateWording('eksekutor_roland', '{kode}', 'eks-rol-{kode}')">Simpan</button></div>''' for kode, teks in TEMPLATE_ROLAND.items()])}
-            </div>
-        </div>
-
+        <!-- TAB 3: KEYWORD FILTER -->
         <div id="tab-keywords" class="tab-content">
             <h2>🔑 Daftar Keyword Filter (Pisahkan dengan Koma ,)</h2>
             <p style="font-size:13px; color:#94a3b8;">Jockeyfess otomatis lolos semua tanpa filter. Keyword di bawah ini berlaku ketat untuk Moneyfess & 6 Base Reguler.</p>
@@ -401,7 +638,8 @@ async def halaman_dashboard():
     return html_content
 
 @app.get("/api/logs")
-async def get_logs(): return {"logs": MENFESS_LOGS}
+async def get_logs():
+    return {"logs": MENFESS_LOGS}
 
 @app.post("/api/test-notif")
 async def trigger_test_notif():
@@ -418,10 +656,10 @@ async def update_akun(data: ToggleModel):
 
 @app.post("/api/update-wording")
 async def update_wording(data: WordingModel):
-    if data.tipe == "eksekutor_berline" and data.kode in TEMPLATE_EKSEKUTOR: TEMPLATE_EKSEKUTOR[data.kode] = data.teks
-    elif data.tipe == "eksekutor_roland" and data.kode in TEMPLATE_ROLAND: TEMPLATE_ROLAND[data.kode] = data.teks
-    elif data.tipe == "berline" and data.kode in WORDING_BERLINE: WORDING_BERLINE[data.kode] = data.teks
-    elif data.tipe == "roland" and data.kode in WORDING_ROLAND: WORDING_ROLAND[data.kode] = data.teks
+    if data.tipe == "eksekutor_berline" and data.kode in TEMPLATE_EKSEKUTOR:
+        TEMPLATE_EKSEKUTOR[data.kode] = data.teks
+    elif data.tipe == "berline" and data.kode in WORDING_BERLINE:
+        WORDING_BERLINE[data.kode] = data.teks
     asyncio.get_event_loop().run_in_executor(None, save_database)
     return {"status": "ok"}
 
@@ -433,347 +671,6 @@ async def update_keywords(data: KeywordModel):
     REGEX_KEYWORDS = build_regex(SEMUA_KEYWORDS)
     asyncio.get_event_loop().run_in_executor(None, save_database)
     return {"status": "ok"}
-
-# ==========================================
-# 6. FITUR NOTIFIKASI KESIAPAN
-# ==========================================
-async def kirim_notifikasi_kesiapan():
-    topik_berline = [ID_TOPIK_BERLINE_JOCKEY, ID_TOPIK_BERLINE_ANOTHER]
-    topik_roland = [ID_TOPIK_ROLAND_JOCKEY, ID_TOPIK_ROLAND_ANOTHER]
-    
-    for tid in topik_berline + topik_roland:
-        try: await client_amel.send_message(ID_GRUP_UTAMA, f"👁️ [RADAR AMEL] Aktif memantau {len(SEMUA_BASE_IDS)} Channel.", reply_to=tid); await asyncio.sleep(0.2)
-        except: pass
-    for tid in topik_berline:
-        try: await client_berline.send_message(ID_GRUP_UTAMA, "👑 [SISTEM] Berline siap!", reply_to=tid); await asyncio.sleep(0.2)
-        except: pass
-    for tid in topik_roland:
-        try: await client_roland.send_message(ID_GRUP_UTAMA, "🎩 [SISTEM] Roland siap!", reply_to=tid); await asyncio.sleep(0.2)
-        except: pass
-    for nama_eks, client_eks in clients_eksekutor.items():
-        info = STATUS_EKSEKUTOR[nama_eks]
-        target_topik = topik_berline if info["tim"] == "berline" else topik_roland
-        for tid in target_topik:
-            try: await client_eks.send_message(ID_GRUP_UTAMA, f"🤖 [{info['nama']}] siap!", reply_to=tid); await asyncio.sleep(0.2)
-            except: pass
-
-# ==========================================
-# 7. HANDLER AMEL DUAL-FORWARDER (JOCKEY ALL + BASE LAIN STRICT)
-# ==========================================
-SUDAH_DIPROSES = set()
-
-async def proses_pesan(msg, chat_id):
-    global PEER_MARKAS_AMEL
-    key = (chat_id, msg.id)
-    if key in SUDAH_DIPROSES: return
-    SUDAH_DIPROSES.add(key)
-    if len(SUDAH_DIPROSES) > 5000: SUDAH_DIPROSES.clear()
-
-    teks_bersih = normalisasi_teks(msg.raw_text or "")
-    
-    if chat_id == ID_JOCKEYFESS:
-        cocok_kw = "ALL (Jockeyfess)"
-        target_berline = ID_TOPIK_BERLINE_JOCKEY
-        target_roland = ID_TOPIK_ROLAND_JOCKEY
-    else:
-        if not teks_bersih or not REGEX_KEYWORDS:
-            return
-        match = REGEX_KEYWORDS.search(teks_bersih)
-        if not match:
-            return
-        cocok_kw = match.group(0)
-        if chat_id == ID_MONEYFESS:
-            target_berline = ID_TOPIK_BERLINE_JOCKEY
-            target_roland = ID_TOPIK_ROLAND_JOCKEY
-        else:
-            target_berline = ID_TOPIK_BERLINE_ANOTHER
-            target_roland = ID_TOPIK_ROLAND_ANOTHER
-
-    try:
-        if not PEER_MARKAS_AMEL:
-            PEER_MARKAS_AMEL = await client_amel.get_input_entity(ID_GRUP_UTAMA)
-            
-        from_peer = await msg.get_input_chat()
-
-        await asyncio.gather(
-            client_amel(ForwardMessagesRequest(
-                from_peer=from_peer, id=[msg.id], to_peer=PEER_MARKAS_AMEL, top_msg_id=target_berline
-            )),
-            client_amel(ForwardMessagesRequest(
-                from_peer=from_peer, id=[msg.id], to_peer=PEER_MARKAS_AMEL, top_msg_id=target_roland
-            )),
-            return_exceptions=True
-        )
-        
-        simpan_log(chat_id, teks_bersih, cocok_kw)
-        print(f"⚡ [FORWARD] Base {chat_id} | KW: {cocok_kw}")
-    except ChatForwardsRestrictedError:
-        pass
-    except Exception as e:
-        print(f"🚨 [ERROR FORWARD] {e}")
-
-def register_amel_handlers(client):
-    @client.on(events.NewMessage(chats=SEMUA_BASE_IDS))
-    async def saring_menfess_instan(event):
-        asyncio.create_task(proses_pesan(event.message, event.chat_id))
-
-async def poll_fallback():
-    last_id = {}
-    for cid in SEMUA_BASE_IDS:
-        try: m = await client_amel.get_messages(cid, limit=1); last_id[cid] = m[0].id if m else 0
-        except: last_id[cid] = 0
-            
-    while True:
-        await asyncio.sleep(5)
-        for cid in SEMUA_BASE_IDS:
-            try:
-                async for m in client_amel.iter_messages(cid, min_id=last_id[cid], reverse=True):
-                    last_id[cid] = max(last_id[cid], m.id)
-                    asyncio.create_task(proses_pesan(m, cid))
-            except FloodWaitError as e: await asyncio.sleep(e.seconds)
-            except: pass
-
-# ==========================================
-# 8. SISTEM KONTROL MANAGER & REPLY BERANTAI
-# ==========================================
-queue_pesan = asyncio.Queue()
-RIWAYAT_KOMENTAR = {}  # {msg_id_di_topik: {"tipe": "manager"|"eksekutor", "tim": ..., "targets": [...]}}
-
-def simpan_riwayat(msg_id_topik, data):
-    RIWAYAT_KOMENTAR[msg_id_topik] = data
-    if len(RIWAYAT_KOMENTAR) > 2000:
-        RIWAYAT_KOMENTAR.pop(next(iter(RIWAYAT_KOMENTAR)))
-
-def format_daftar_nama(daftar_nama):
-    if not daftar_nama: return ""
-    if len(daftar_nama) == 1: return daftar_nama[0]
-    if len(daftar_nama) == 2: return f"{daftar_nama[0]} dan {daftar_nama[1]}"
-    return ", ".join(daftar_nama[:-1]) + f", dan {daftar_nama[-1]}"
-
-def register_manager_handlers(client_manager, manager_type, my_id, topik_jockey, dict_template, dict_wording):
-    @client_manager.on(events.NewMessage(chats=ID_GRUP_UTAMA))
-    async def tangkap_command(event):
-        if not event.is_reply: return
-        
-        sender = await event.get_sender()
-        if not sender or sender.id != my_id: return
-
-        reply_msg = await event.get_reply_message()
-        if not reply_msg: return
-
-        input_teks = event.raw_text.strip()
-        cmd_lower = input_teks.lower()
-
-        # -------------------------------------------------------
-        # A. JIKA REPLY KE PESAN "✅ ..." (REPLY BERANTAI INSTAN)
-        # -------------------------------------------------------
-        if reply_msg.id in RIWAYAT_KOMENTAR:
-            riwayat = RIWAYAT_KOMENTAR[reply_msg.id]
-            if riwayat["tim"] != manager_type:
-                return
-
-            if riwayat["tipe"] == "manager":
-                target = riwayat["targets"][0]
-                teks_kirim = dict_wording.get(cmd_lower, input_teks)
-                try:
-                    sent = await client_manager.send_message(
-                        entity=target["chat_id"],
-                        message=teks_kirim,
-                        reply_to=target["msg_id"]
-                    )
-                    simpan_riwayat(event.id, {
-                        "tipe": "manager",
-                        "tim": manager_type,
-                        "targets": [{"chat_id": sent.chat_id, "msg_id": sent.id}]
-                    })
-                    await event.edit("✅ Balasan mandiri terkirim ke Base!")
-                except FloodWaitError as e:
-                    await event.edit(f"⏳ Terkena FloodWait {e.seconds} detik.")
-                except Exception as e:
-                    await event.edit(f"❌ Gagal membalas: {e}")
-                return
-
-            elif riwayat["tipe"] == "eksekutor":
-                async def balas_eksekutor(t):
-                    nama_akun = t["akun"]
-                    try:
-                        sent = await clients_eksekutor[nama_akun].send_message(
-                            entity=t["chat_id"],
-                            message=input_teks,
-                            reply_to=t["msg_id"]
-                        )
-                        return (True, STATUS_EKSEKUTOR[nama_akun]["nama"], {
-                            "akun": nama_akun, "chat_id": sent.chat_id, "msg_id": sent.id
-                        })
-                    except FloodWaitError as e:
-                        STATUS_EKSEKUTOR[nama_akun]["aktif"] = False
-                        asyncio.get_event_loop().run_in_executor(None, save_database)
-                        return (False, f"{STATUS_EKSEKUTOR[nama_akun]['nama']} floodwait {e.seconds}s.", None)
-                    except Exception:
-                        return (False, None, None)
-
-                results = await asyncio.gather(*[balas_eksekutor(t) for t in riwayat["targets"]])
-                berhasil = [r[1] for r in results if r[0]]
-                targets_baru = [r[2] for r in results if r[0] and r[2]]
-                laporan_fw = [r[1] for r in results if not r[0] and r[1]]
-
-                if targets_baru:
-                    simpan_riwayat(event.id, {
-                        "tipe": "eksekutor",
-                        "tim": manager_type,
-                        "targets": targets_baru
-                    })
-
-                baris = [f"✅ Balasan terkirim oleh {format_daftar_nama(berhasil)}." if berhasil else "❌ Gagal membalas."]
-                if laporan_fw: baris.extend(laporan_fw)
-                await event.edit("\n".join(baris))
-                return
-
-        # -------------------------------------------------------
-        # B. JIKA REPLY KE FORWARD-AN MENFESS DARI BASE
-        # -------------------------------------------------------
-        if not reply_msg.forward: return
-        forward_from = reply_msg.forward
-        if not forward_from.chat_id or not forward_from.channel_post:
-            return
-
-        # Trigger Eksekutor
-        if cmd_lower in dict_template:
-            asal_thread = reply_msg.reply_to_msg_id if reply_msg.reply_to_msg_id else 0
-            jalur = "jockey_money" if asal_thread == topik_jockey else "reguler"
-            
-            await queue_pesan.put({
-                "event": event, "reply_msg": reply_msg, "cmd": cmd_lower, 
-                "jalur": jalur, "tim": manager_type, "template": dict_template
-            })
-            return
-
-        # Command Mandiri Manager (a, b, atau ketikan bebas)
-        try:
-            teks_kirim = dict_wording.get(cmd_lower, input_teks)
-            sent = await client_manager.send_message(
-                entity=forward_from.chat_id,
-                message=teks_kirim,
-                comment_to=forward_from.channel_post
-            )
-            simpan_riwayat(event.id, {
-                "tipe": "manager",
-                "tim": manager_type,
-                "targets": [{"chat_id": sent.chat_id, "msg_id": sent.id}]
-            })
-            await event.edit("✅ Berhasil mengirim komentar mandiri ke Base!")
-        except FloodWaitError as e:
-            await event.edit(f"⏳ Terkena FloodWait {e.seconds} detik.")
-        except Exception as e:
-            await event.edit(f"❌ Gagal: {e}")
-
-async def worker_eksekutor():
-    while True:
-        task = await queue_pesan.get()
-        event_mgr = task["event"]
-        reply_msg = task["reply_msg"]
-        
-        try:
-            forward_from = reply_msg.forward
-            chat_asal = forward_from.chat_id
-            msg_asal = forward_from.channel_post
-            
-            akun_bertugas = [
-                nama for nama, info in STATUS_EKSEKUTOR.items() 
-                if info["aktif"] and (info["jalur"] == task["jalur"] or info["jalur"] == "semua") and info["tim"] == task["tim"]
-            ]
-            
-            async def kirim_pesan_eksekutor(nama_akun):
-                try:
-                    teks_final = task["template"][task["cmd"]]
-                    
-                    if task["jalur"] == "jockey_money":
-                        teks_final = teks_final.replace("@Berrline", "@.Berrline").replace("@Roland", "@.Roland").replace("@DebugW", "@.DebugW")
-                    
-                    if task["tim"] == "roland":
-                        if nama_akun == "Land": teks_final += " #L"
-                        elif nama_akun == "Vasa": teks_final += " #VS"
-                    
-                    sent = await clients_eksekutor[nama_akun].send_message(
-                        entity=chat_asal, message=teks_final, comment_to=msg_asal
-                    )
-                    return (True, STATUS_EKSEKUTOR[nama_akun]["nama"], {
-                        "akun": nama_akun, "chat_id": sent.chat_id, "msg_id": sent.id
-                    })
-                except FloodWaitError as e:
-                    STATUS_EKSEKUTOR[nama_akun]["aktif"] = False
-                    asyncio.get_event_loop().run_in_executor(None, save_database)
-                    return (False, f"{STATUS_EKSEKUTOR[nama_akun]['nama']} floodwait {e.seconds}s.", None)
-                except Exception:
-                    return (False, None, None)
-
-            tasks = [kirim_pesan_eksekutor(nama) for nama in akun_bertugas]
-            results = await asyncio.gather(*tasks)
-
-            berhasil = [res[1] for res in results if res[0]]
-            targets_berhasil = [res[2] for res in results if res[0] and res[2]]
-            laporan_floodwait = [res[1] for res in results if not res[0] and res[1]]
-
-            if targets_berhasil:
-                simpan_riwayat(event_mgr.id, {
-                    "tipe": "eksekutor",
-                    "tim": task["tim"],
-                    "targets": targets_berhasil
-                })
-
-            baris_laporan = [f"✅ Terkirim oleh {format_daftar_nama(berhasil)}." if berhasil else "❌ Gagal terkirim."]
-            if laporan_floodwait: baris_laporan.extend(laporan_floodwait)
-            
-            await event_mgr.edit("\n".join(baris_laporan))
-        except Exception as e:
-            await event_mgr.edit(f"❌ Error: {e}")
-        queue_pesan.task_done()
-
-# ==========================================
-# 9. STARTUP SERVICES
-# ==========================================
-async def start_services():
-    global ID_AMEL, ID_BERLINE, ID_ROLAND, PEER_MARKAS_AMEL
-    
-    print("\n⏳ Menghubungkan akun Amel & Mengisi State Cache Dialogs...")
-    await client_amel.start()
-    await client_amel.get_dialogs(limit=50)
-    ID_AMEL = (await client_amel.get_me()).id
-    PEER_MARKAS_AMEL = await client_amel.get_input_entity(ID_GRUP_UTAMA)
-    register_amel_handlers(client_amel)
-    print(f"✅ Amel Berhasil Terhubung! (ID: {ID_AMEL})")
-
-    print("⏳ Menghubungkan akun Berline...")
-    await client_berline.start()
-    ID_BERLINE = (await client_berline.get_me()).id
-    register_manager_handlers(client_berline, "berline", ID_BERLINE, ID_TOPIK_BERLINE_JOCKEY, TEMPLATE_EKSEKUTOR, WORDING_BERLINE)
-    print(f"✅ Berline Berhasil Terhubung! (ID: {ID_BERLINE})")
-
-    print("⏳ Menghubungkan akun Roland...")
-    await client_roland.start()
-    ID_ROLAND = (await client_roland.get_me()).id
-    register_manager_handlers(client_roland, "roland", ID_ROLAND, ID_TOPIK_ROLAND_JOCKEY, TEMPLATE_ROLAND, WORDING_ROLAND)
-    print(f"✅ Roland Berhasil Terhubung! (ID: {ID_ROLAND})")
-
-    for nama, client in clients_eksekutor.items():
-        print(f"⏳ Menghubungkan eksekutor: {nama}...")
-        await client.start()
-        me_eks = await client.get_me()
-        
-        nama_asli = me_eks.first_name or me_eks.username or nama
-        STATUS_EKSEKUTOR[nama]["nama"] = nama_asli
-        print(f"✅ Terhubung: {nama_asli} ({STATUS_EKSEKUTOR[nama]['tim']})")
-
-    save_database()
-
-    asyncio.create_task(kirim_notifikasi_kesiapan())
-    asyncio.create_task(worker_eksekutor())
-    asyncio.create_task(poll_fallback())
-    
-    print("\n🚀 Markas Utama (Berline & Roland) Siap Tempur!\n")
-
-@app.on_event("startup")
-async def startup_event(): asyncio.create_task(start_services())
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8080))
